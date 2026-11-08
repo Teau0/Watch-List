@@ -611,7 +611,7 @@ function openForm(i) {
   $("f-platform").value = i?.platform || ""; $("f-note").value = i?.note || "";
   $("f-genres").value = (i?.genres || []).join(", "); $("f-poster").value = i?.poster || "";
   setSeasons(i?.seasons || null, i?.season || 1);
-  lastPick = i ? { existing: true } : null; $("results").innerHTML = ""; $("rhint").textContent = i ? "" : "Commence par choisir le type, puis tape le titre.";
+  lastPick = i ? { existing: true } : null; $("results").innerHTML = ""; $("rhint").textContent = i ? "" : "Tape le titre d'un film, d'une série ou d'un animé.";
   setStatus(i?.status || "todo"); toggleEp(); showChosen();
   $("del-btn").hidden = !i; $("del-btn").textContent = "Supprimer"; $("del-btn").dataset.armed = "";
   $("dlg").showModal(); $("f-title").focus();
@@ -660,6 +660,7 @@ let lastPick = null, searchSeq = 0, searchTimer = null;
 async function searchAniList(q) {
   const query = `query($q:String){Page(perPage:6){media(search:$q,type:ANIME,sort:SEARCH_MATCH){id format episodes genres seasonYear startDate{year} title{romaji english} coverImage{large medium}}}}`;
   const r = await fetch("https://graphql.anilist.co", { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" }, body: JSON.stringify({ query, variables: { q } }) });
+  if (!r.ok) throw new Error("anilist " + r.status);
   const j = await r.json();
   return (j.data?.Page?.media || []).map(m => ({ src: "AniList", type: "anime", title: m.title.english || m.title.romaji, alt: m.title.english && m.title.romaji !== m.title.english ? m.title.romaji : "",
     year: m.seasonYear || m.startDate?.year || null, genres: (m.genres || []).map(fr), poster: m.coverImage?.large || m.coverImage?.medium || "",
@@ -667,6 +668,7 @@ async function searchAniList(q) {
 }
 async function searchTVmaze(q) {
   const r = await fetch("https://api.tvmaze.com/search/shows?q=" + encodeURIComponent(q));
+  if (!r.ok) throw new Error("tvmaze " + r.status);
   const j = await r.json();
   return j.slice(0, 6).map(({ show: s }) => ({ src: "TVmaze", type: "serie", tvmaze: s.id, title: s.name, year: s.premiered ? +s.premiered.slice(0, 4) : null,
     genres: (s.genres || []).map(fr), poster: s.image?.medium || s.image?.original || "", info: [s.network?.name || s.webChannel?.name, s.status === "Ended" ? "terminée" : s.status === "Running" ? "en cours" : ""].filter(Boolean).join(" · ") }));
@@ -678,6 +680,29 @@ async function searchIMDb(q, kinds) {
   return (j.d || []).filter(d => kinds.includes(d.qid)).slice(0, 6).map(d => ({ src: "IMDb", type: d.qid.startsWith("tv") && d.qid !== "tvMovie" ? "serie" : "film",
     title: d.l, year: d.y || null, genres: [], poster: d.i?.imageUrl ? d.i.imageUrl.replace(/\._V1_.*(\.\w+)$/, "._V1_UX240_$1") : "", info: d.s || "" }));
 }
+async function searchJikan(q) {
+  const r = await fetch("https://api.jikan.moe/v4/anime?limit=6&sfw=true&q=" + encodeURIComponent(q));
+  if (!r.ok) throw new Error("jikan " + r.status);
+  const j = await r.json();
+  return (j.data || []).map(m => ({ src: "MyAnimeList", type: "anime", title: m.title_english || m.title, alt: m.title_english && m.title !== m.title_english ? m.title : "",
+    year: m.year || m.aired?.prop?.from?.year || null, genres: [...(m.genres || []), ...(m.themes || [])].map(g => fr(g.name)).slice(0, 6),
+    poster: m.images?.jpg?.large_image_url || m.images?.jpg?.image_url || "", seasons: m.episodes ? [m.episodes] : null,
+    info: [m.type, m.episodes ? m.episodes + " ép." : "en cours de diffusion"].filter(Boolean).join(" · ") }));
+}
+async function searchWiki(q) {
+  const u = "https://fr.wikipedia.org/w/api.php?action=query&format=json&origin=*&generator=search&gsrlimit=8&prop=pageimages|description&piprop=thumbnail&pithumbsize=240&gsrsearch=" + encodeURIComponent(q);
+  const r = await fetch(u);
+  if (!r.ok) throw new Error("wiki " + r.status);
+  const j = await r.json();
+  return Object.values(j.query?.pages || {}).sort((a, b) => a.index - b.index)
+    .filter(p => /film|série|feuilleton|anim|documentaire|téléfilm/i.test(p.description || ""))
+    .slice(0, 6).map(p => {
+      const d = p.description || "";
+      const type = /anim[ée] japonais|anime|manga/i.test(d) ? "anime" : /série|feuilleton/i.test(d) ? "serie" : /documentaire/i.test(d) ? "docu" : "film";
+      return { src: "Wikipédia", type, title: p.title.replace(/\s*\((film|série télévisée|série|téléfilm|anime)[^)]*\)$/i, ""), year: +(d.match(/\b(18|19|20)\d{2}\b/) || [])[0] || null,
+        genres: [], poster: p.thumbnail?.source || "", info: d };
+    });
+}
 async function seasonsFromTVmaze(id) {
   const r = await fetch(`https://api.tvmaze.com/shows/${id}/episodes`);
   const eps = await r.json();
@@ -688,16 +713,25 @@ async function seasonsFromTVmaze(id) {
 }
 async function runSearch(q) {
   const seq = ++searchSeq, type = $("f-type").value;
-  const jobs = type === "anime" ? [searchAniList(q)]
-    : type === "serie" ? [searchTVmaze(q), searchIMDb(q, ["tvSeries", "tvMiniSeries"])]
-    : type === "film" ? [searchIMDb(q, ["movie", "tvMovie", "video"])]
-    : [searchIMDb(q, ["movie", "tvMovie", "tvSeries", "tvMiniSeries", "video", "tvSpecial"]), searchTVmaze(q)];
+  // On interroge toutes les sources, quel que soit le type choisi, puis on met en tête celles qui correspondent au type.
+  const sources = [
+    ["AniList", searchAniList], ["MyAnimeList", searchJikan], ["TVmaze", searchTVmaze], ["Wikipédia", searchWiki],
+    ["IMDb", (s) => searchIMDb(s, ["movie", "tvMovie", "video", "tvSeries", "tvMiniSeries", "tvSpecial"])],
+  ];
   $("rhint").textContent = "Recherche…";
-  const settled = await Promise.allSettled(jobs);
+  const settled = await Promise.allSettled(sources.map(([, f]) => f(q)));
   if (seq !== searchSeq) return;
-  const res = settled.flatMap(s => s.status === "fulfilled" ? s.value : []);
+  settled.forEach((s, k) => { if (s.status === "rejected") console.warn("[Watch Liste] source indisponible :", sources[k][0], s.reason); });
+  const all = settled.flatMap(s => s.status === "fulfilled" ? s.value : []);
   const failed = settled.every(s => s.status === "rejected");
-  $("rhint").textContent = failed ? "La recherche ne répond pas (connexion, ou page ouverte depuis Claude). Tu peux remplir les champs à la main."
+  const seen = new Set(), res = [];
+  const rank = (r) => (r.type === type ? 0 : 1);
+  [...all].sort((a, b) => rank(a) - rank(b)).forEach(r => {
+    const key = r.title.toLowerCase().replace(/[^a-z0-9]/g, "") + "|" + (r.year || "") + "|" + r.type;
+    if (seen.has(key)) return; seen.add(key); res.push(r);
+  });
+  res.splice(14);
+  $("rhint").textContent = failed ? "Aucune source de recherche ne répond. Vérifie ta connexion, ou remplis les champs à la main."
     : res.length ? "Choisis le bon titre pour remplir l'image, les genres et les épisodes." : "Aucun résultat. Essaie le titre original ou anglais.";
   const box = $("results"); box.innerHTML = "";
   res.forEach(r => {
@@ -714,7 +748,7 @@ async function choose(r) {
   $("results").innerHTML = ""; $("rhint").textContent = "";
   $("f-title").value = r.title;
   if (r.year) $("f-year").value = r.year;
-  if (r.type && $("f-type").value !== "docu" && $("f-type").value !== "autre") $("f-type").value = r.type;
+  if (r.type) $("f-type").value = r.type;
   $("f-genres").value = r.genres.join(", ");
   $("f-poster").value = r.poster || "";
   let seasons = r.seasons || null;
