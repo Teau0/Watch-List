@@ -713,34 +713,45 @@ async function seasonsFromTVmaze(id) {
 }
 async function runSearch(q) {
   const seq = ++searchSeq, type = $("f-type").value;
-  // On interroge toutes les sources, quel que soit le type choisi, puis on met en tête celles qui correspondent au type.
+  // Toutes les sources partent en même temps ; chaque réponse s'affiche dès qu'elle arrive,
+  // et une source qui traîne plus de 6 s est abandonnée.
   const sources = [
-    ["AniList", searchAniList], ["MyAnimeList", searchJikan], ["TVmaze", searchTVmaze], ["Wikipédia", searchWiki],
-    ["IMDb", (s) => searchIMDb(s, ["movie", "tvMovie", "video", "tvSeries", "tvMiniSeries", "tvSpecial"])],
+    ["AniList", searchAniList], ["MyAnimeList", searchJikan], ["TVmaze", searchTVmaze],
+    ["IMDb", (s) => searchIMDb(s, ["movie", "tvMovie", "video", "tvSeries", "tvMiniSeries", "tvSpecial"])], ["Wikipédia", searchWiki],
   ];
+  const got = sources.map(() => null);
+  let pending = sources.length, failures = 0;
   $("rhint").textContent = "Recherche…";
-  const settled = await Promise.allSettled(sources.map(([, f]) => f(q)));
-  if (seq !== searchSeq) return;
-  settled.forEach((s, k) => { if (s.status === "rejected") console.warn("[Watch Liste] source indisponible :", sources[k][0], s.reason); });
-  const all = settled.flatMap(s => s.status === "fulfilled" ? s.value : []);
-  const failed = settled.every(s => s.status === "rejected");
-  const seen = new Set(), res = [];
-  const rank = (r) => (r.type === type ? 0 : 1);
-  [...all].sort((a, b) => rank(a) - rank(b)).forEach(r => {
-    const key = r.title.toLowerCase().replace(/[^a-z0-9]/g, "") + "|" + (r.year || "") + "|" + r.type;
-    if (seen.has(key)) return; seen.add(key); res.push(r);
-  });
-  res.splice(14);
-  $("rhint").textContent = failed ? "Aucune source de recherche ne répond. Vérifie ta connexion, ou remplis les champs à la main."
-    : res.length ? "Choisis le bon titre pour remplir l'image, les genres et les épisodes." : "Aucun résultat. Essaie le titre original ou anglais.";
-  const box = $("results"); box.innerHTML = "";
-  res.forEach(r => {
-    const b = document.createElement("button"); b.type = "button"; b.className = "res";
-    b.innerHTML = `${r.poster ? `<img src="${esc(r.poster)}" alt="" loading="lazy">` : `<span class="noimg"></span>`}
+  $("results").innerHTML = "";
+  const draw = () => {
+    if (seq !== searchSeq) return;
+    const seen = new Set(), res = [];
+    const all = got.flatMap(x => x || []);
+    const rank = (r) => (r.type === type ? 0 : 1);
+    [...all].sort((x, y) => rank(x) - rank(y)).forEach(r => {
+      const key = r.title.toLowerCase().replace(/[^a-z0-9]/g, "") + "|" + (r.year || "") + "|" + r.type;
+      if (seen.has(key)) return; seen.add(key); res.push(r);
+    });
+    res.splice(14);
+    $("rhint").textContent = res.length ? (pending ? "Choisis le bon titre… (d'autres résultats arrivent)" : "Choisis le bon titre pour remplir l'image, les genres et les épisodes.")
+      : pending ? "Recherche…" : failures === sources.length ? "Aucune source de recherche ne répond. Vérifie ta connexion, ou remplis les champs à la main."
+      : "Aucun résultat. Essaie le titre original ou anglais.";
+    const box = $("results"); box.innerHTML = "";
+    res.forEach(r => {
+      const bt = document.createElement("button"); bt.type = "button"; bt.className = "res";
+      bt.innerHTML = `${r.poster ? `<img src="${esc(r.poster)}" alt="" loading="lazy">` : `<span class="noimg"></span>`}
       <span style="min-width:0"><b>${esc(r.title)}${r.year ? ` (${r.year})` : ""}</b>
       <small>${esc([r.alt, r.genres.slice(0, 3).join(", "), r.info].filter(Boolean).join(" · "))}</small> <span class="src">${r.src}</span></span>`;
-    b.onclick = () => choose(r);
-    box.append(b);
+      bt.onclick = () => choose(r);
+      box.append(bt);
+    });
+  };
+  const timeout = (ms) => new Promise((_, rej) => setTimeout(() => rej(new Error("délai dépassé")), ms));
+  sources.forEach(([name, f], k) => {
+    Promise.race([f(q), timeout(6000)])
+      .then(v => { got[k] = v; })
+      .catch(e => { failures++; console.warn("[Watch Liste] source indisponible :", name, e); })
+      .finally(() => { pending--; if (seq === searchSeq && !lastPick) draw(); });
   });
 }
 async function choose(r) {
