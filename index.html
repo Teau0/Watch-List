@@ -317,7 +317,7 @@ select option { background: #3a1212; }
       <label>Épisodes au total<input id="f-eptotal" type="number" min="0" placeholder="?"></label>
     </div>
     <div class="row2">
-      <label>Note<select id="f-rating"><option value="0">Pas noté</option><option value="1">★</option><option value="2">★★</option><option value="3">★★★</option><option value="4">★★★★</option><option value="5">★★★★★</option></select></label>
+      <label>Note<select id="f-rating"><option value="0">Pas noté</option><option value="10">10 / 10</option><option value="9">9 / 10</option><option value="8">8 / 10</option><option value="7">7 / 10</option><option value="6">6 / 10</option><option value="5">5 / 10</option><option value="4">4 / 10</option><option value="3">3 / 10</option><option value="2">2 / 10</option><option value="1">1 / 10</option></select></label>
       <label>Plateforme<input id="f-platform" maxlength="60" placeholder="Netflix, Crunchyroll, cinéma…"></label>
     </div>
     <label>Mes notes<textarea id="f-note" rows="2" maxlength="1000" placeholder="Un avis, qui me l'a conseillé…"></textarea></label>
@@ -339,8 +339,8 @@ const STATUS1 = { doing: "En cours", todo: "À voir", done: "Vu" };
 const DAY = 86400000;
 const now0 = Date.now();
 const EXAMPLES = [
-  { title: "Frieren", type: "anime", year: 2023, status: "doing", ep: 17, epTotal: 28, rating: 5, platform: "Crunchyroll", note: "", createdAt: now0 - 20 * DAY, updated: now0 - DAY },
-  { title: "Dune : deuxième partie", type: "film", year: 2024, status: "done", rating: 4, platform: "Cinéma", note: "À revoir en IMAX.", createdAt: now0 - 40 * DAY, doneAt: now0 - 3 * DAY, updated: now0 - 3 * DAY },
+  { title: "Frieren", type: "anime", year: 2023, status: "doing", ep: 17, epTotal: 28, rating: 10, ratingScale: 10, platform: "Crunchyroll", note: "", createdAt: now0 - 20 * DAY, updated: now0 - DAY },
+  { title: "Dune : deuxième partie", type: "film", year: 2024, status: "done", rating: 8, ratingScale: 10, platform: "Cinéma", note: "À revoir en IMAX.", createdAt: now0 - 40 * DAY, doneAt: now0 - 3 * DAY, updated: now0 - 3 * DAY },
   { title: "Severance", type: "serie", year: 2022, status: "todo", ep: 0, epTotal: 19, rating: 0, platform: "Apple TV+", note: "Conseillé par un ami.", createdAt: now0 - 6 * DAY, updated: now0 - 6 * DAY },
 ];
 
@@ -381,11 +381,20 @@ async function boot() {
     store = db && id ? dbStore(db, id) : localStore();
   } catch { store = localStore(); }
   store.start((arr, meta) => {
-    items = arr;
+    items = migrateRatings(arr);
     if (!meta || !meta.fromCache) clearTimeout(timer);
     setSync(store.kind === "db" ? "Synchronisé avec ton compte · tous tes appareils" : "Enregistré dans ce navigateur uniquement");
     render();
   }, (e) => { clearTimeout(timer); setSync("Impossible de lire ta liste (" + (e?.code || "erreur") + ")"); });
+}
+// Les notes étaient sur 5 avant le 9 nov. 2026 : on les double une seule fois (ratingScale marque les notes déjà sur 10).
+function migrateRatings(arr) {
+  return arr.map(it => {
+    if (!it.rating || it.ratingScale === 10) return it;
+    const up = { ...it, rating: Math.min(10, it.rating * 2), ratingScale: 10 };
+    if (store) store.save(up).catch(() => {});
+    return up;
+  });
 }
 function setSync(t) { $("sync").textContent = t; }
 
@@ -462,7 +471,7 @@ function render() {
   const rated = all.filter(i => i.rating);
   const avg = rated.length ? rated.reduce((s, i) => s + i.rating, 0) / rated.length : 0;
   const plat = Object.entries(all.reduce((m, i) => (i.platform && (m[i.platform] = (m[i.platform] || 0) + 1), m), {})).sort((a, b) => b[1] - a[1])[0];
-  const pct = avg / 5, R = 22, C = 2 * Math.PI * R;
+  const pct = avg / 10, R = 22, C = 2 * Math.PI * R;
   $("tiles").innerHTML = `
     <div class="tile"><svg class="gauge" viewBox="0 0 54 54" aria-hidden="true"><circle cx="27" cy="27" r="${R}" fill="none" stroke="rgba(255,240,225,.14)" stroke-width="6"/>
       <circle cx="27" cy="27" r="${R}" fill="none" stroke="#f2c14e" stroke-width="6" stroke-linecap="round" stroke-dasharray="${(C * pct).toFixed(1)} ${C.toFixed(1)}" transform="rotate(-90 27 27)"/>
@@ -531,7 +540,7 @@ function row(i, compact) {
   const sub = [];
   if (serial && (i.ep || pr.total || i.seasons)) sub.push(`<span class="mini"><i style="width:${pct}%"></i></span><span>${pr.label}</span>`);
   if (!compact || !serial) sub.push(`<span class="spill ${i.status}">${STATUS1[i.status]}</span>`);
-  if (i.rating) sub.push(`<span class="stars">${"★".repeat(i.rating)}</span>`);
+  if (i.rating) sub.push(`<span class="stars">★ ${i.rating}/10</span>`);
   if (i.platform) sub.push(`<span>${esc(i.platform)}</span>`);
   if (i.example) sub.push(`<span class="ex">exemple</span>`);
   const genres = (i.genres || []).slice(0, compact ? 3 : 6);
@@ -633,7 +642,7 @@ $("form").addEventListener("submit", (e) => {
   const num = (v) => v === "" ? null : Math.max(0, parseInt(v, 10) || 0);
   persist({ ...prev, id: editingId || uid(), title: $("f-title").value.trim(), type: $("f-type").value, year: num($("f-year").value),
     status: $("f-status").dataset.value, ep: num($("f-ep").value) || 0, epTotal: num($("f-eptotal").value),
-    rating: +$("f-rating").value, platform: $("f-platform").value.trim(), note: $("f-note").value.trim(),
+    rating: +$("f-rating").value, ratingScale: 10, platform: $("f-platform").value.trim(), note: $("f-note").value.trim(),
     genres: $("f-genres").value.split(",").map(g => g.trim()).filter(Boolean),
     poster: /^https:\/\//.test($("f-poster").value.trim()) ? $("f-poster").value.trim() : "",
     seasons: SERIAL.has($("f-type").value) ? parseSeasons($("f-seasons").value) : null,
