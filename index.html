@@ -673,12 +673,46 @@ async function searchTVmaze(q) {
   return j.slice(0, 6).map(({ show: s }) => ({ src: "TVmaze", type: "serie", tvmaze: s.id, title: s.name, year: s.premiered ? +s.premiered.slice(0, 4) : null,
     genres: (s.genres || []).map(fr), poster: s.image?.medium || s.image?.original || "", info: [s.network?.name || s.webChannel?.name, s.status === "Ended" ? "terminée" : s.status === "Running" ? "en cours" : ""].filter(Boolean).join(" · ") }));
 }
+// JSONP : charge une réponse via une balise <script>, ce qui marche même quand le service n'autorise pas les appels directs.
+function jsonp(url, cbName, ms = 6000) {
+  return new Promise((resolve, reject) => {
+    const sc = document.createElement("script");
+    const done = (fn, v) => { clearTimeout(t); try { delete window[cbName]; } catch { window[cbName] = undefined; } sc.remove(); fn(v); };
+    const t = setTimeout(() => done(reject, new Error("délai dépassé")), ms);
+    window[cbName] = (data) => done(resolve, data);
+    sc.onerror = () => done(reject, new Error("script bloqué"));
+    sc.src = url; sc.referrerPolicy = "no-referrer";
+    document.head.append(sc);
+  });
+}
+const imdbImg = (u) => u ? u.replace(/\._V1_.*(\.\w+)$/, "._V1_UX300_$1") : "";
+function mapIMDb(list, kinds) {
+  return (list || []).filter(d => d.l && (!d.q && !d.qid ? false : true))
+    .map(d => ({ ...d, kind: d.qid || ({ "feature": "movie", "TV series": "tvSeries", "TV mini-series": "tvMiniSeries", "TV movie": "tvMovie", "video": "video", "TV special": "tvSpecial" }[d.q] || d.q) }))
+    .filter(d => kinds.includes(d.kind)).slice(0, 6)
+    .map(d => ({ src: "IMDb", type: d.kind.startsWith("tv") && d.kind !== "tvMovie" ? "serie" : "film",
+      title: d.l, year: d.y || null, genres: [], poster: imdbImg(d.i?.imageUrl || (Array.isArray(d.i) ? d.i[0] : "")), info: d.s || "" }));
+}
 async function searchIMDb(q, kinds) {
-  const first = (q.trim()[0] || "x").toLowerCase().replace(/[^a-z0-9]/, "x");
-  const r = await fetch(`https://v3.sg.media-imdb.com/suggestion/${first}/${encodeURIComponent(q.trim())}.json`);
-  const j = await r.json();
-  return (j.d || []).filter(d => kinds.includes(d.qid)).slice(0, 6).map(d => ({ src: "IMDb", type: d.qid.startsWith("tv") && d.qid !== "tvMovie" ? "serie" : "film",
-    title: d.l, year: d.y || null, genres: [], poster: d.i?.imageUrl ? d.i.imageUrl.replace(/\._V1_.*(\.\w+)$/, "._V1_UX240_$1") : "", info: d.s || "" }));
+  try {
+    const first = (q.trim()[0] || "x").toLowerCase().replace(/[^a-z0-9]/, "x");
+    const r = await fetch(`https://v3.sg.media-imdb.com/suggestion/${first}/${encodeURIComponent(q.trim())}.json`);
+    if (!r.ok) throw new Error("imdb " + r.status);
+    return mapIMDb((await r.json()).d, kinds);
+  } catch {
+    // Repli JSONP sur l'ancienne adresse d'IMDb (le nom de la fonction de rappel est imposé par IMDb).
+    const key = q.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9 ]/g, "").replace(/\s+/g, "_").slice(0, 40);
+    if (!key) return [];
+    const j = await jsonp(`https://sg.media-imdb.com/suggests/${key[0]}/${key}.json`, "imdb$" + key);
+    return mapIMDb(j.d, kinds);
+  }
+}
+async function searchITunes(q) {
+  const cb = "wlItunes" + Math.random().toString(36).slice(2);
+  const j = await jsonp(`https://itunes.apple.com/search?media=movie&entity=movie&limit=6&country=FR&lang=fr_fr&term=${encodeURIComponent(q)}&callback=${cb}`, cb);
+  return (j.results || []).map(m => ({ src: "Apple TV", type: "film", title: m.trackName, year: m.releaseDate ? +m.releaseDate.slice(0, 4) : null,
+    genres: m.primaryGenreName ? [fr(m.primaryGenreName)] : [], poster: (m.artworkUrl100 || "").replace(/\/\d+x\d+bb\./, "/400x600bb."),
+    info: m.artistName ? "de " + m.artistName : "" }));
 }
 async function searchJikan(q) {
   const r = await fetch("https://api.jikan.moe/v4/anime?limit=6&sfw=true&q=" + encodeURIComponent(q));
@@ -717,9 +751,9 @@ async function runSearch(q) {
   // et une source qui traîne plus de 6 s est abandonnée.
   const sources = [
     ["AniList", searchAniList], ["MyAnimeList", searchJikan], ["TVmaze", searchTVmaze],
-    ["IMDb", (s) => searchIMDb(s, ["movie", "tvMovie", "video", "tvSeries", "tvMiniSeries", "tvSpecial"])], ["Wikipédia", searchWiki],
+    ["IMDb", (s) => searchIMDb(s, ["movie", "tvMovie", "video", "tvSeries", "tvMiniSeries", "tvSpecial"])], ["Apple TV", searchITunes], ["Wikipédia", searchWiki],
   ];
-  const got = sources.map(() => null);
+  const got = sources.map(() => null), state = sources.map(() => "…");
   let pending = sources.length, failures = 0;
   $("rhint").textContent = "Recherche…";
   $("results").innerHTML = "";
@@ -727,15 +761,16 @@ async function runSearch(q) {
     if (seq !== searchSeq) return;
     const seen = new Set(), res = [];
     const all = got.flatMap(x => x || []);
-    const rank = (r) => (r.type === type ? 0 : 1);
+    const rank = (r) => (r.type === type ? 0 : 2) + (r.src === "Wikipédia" ? 1 : 0) + (r.poster ? 0 : 0.5);
     [...all].sort((x, y) => rank(x) - rank(y)).forEach(r => {
-      const key = r.title.toLowerCase().replace(/[^a-z0-9]/g, "") + "|" + (r.year || "") + "|" + r.type;
+      const key = r.title.toLowerCase().normalize("NFD").replace(/[^a-z0-9]/g, "") + "|" + (r.year || "");
       if (seen.has(key)) return; seen.add(key); res.push(r);
     });
     res.splice(14);
     $("rhint").textContent = res.length ? (pending ? "Choisis le bon titre… (d'autres résultats arrivent)" : "Choisis le bon titre pour remplir l'image, les genres et les épisodes.")
       : pending ? "Recherche…" : failures === sources.length ? "Aucune source de recherche ne répond. Vérifie ta connexion, ou remplis les champs à la main."
       : "Aucun résultat. Essaie le titre original ou anglais.";
+    if (!pending) $("rhint").textContent += " Sources : " + sources.map(([n], k) => n + (state[k] === "ok" ? " ✓" : " ✗")).join(", ") + ".";
     const box = $("results"); box.innerHTML = "";
     res.forEach(r => {
       const bt = document.createElement("button"); bt.type = "button"; bt.className = "res";
@@ -749,8 +784,8 @@ async function runSearch(q) {
   const timeout = (ms) => new Promise((_, rej) => setTimeout(() => rej(new Error("délai dépassé")), ms));
   sources.forEach(([name, f], k) => {
     Promise.race([f(q), timeout(6000)])
-      .then(v => { got[k] = v; })
-      .catch(e => { failures++; console.warn("[Watch Liste] source indisponible :", name, e); })
+      .then(v => { got[k] = v; state[k] = "ok"; })
+      .catch(e => { failures++; state[k] = "ko"; console.warn("[Watch Liste] source indisponible :", name, e); })
       .finally(() => { pending--; if (seq === searchSeq && !lastPick) draw(); });
   });
 }
